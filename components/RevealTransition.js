@@ -14,8 +14,8 @@ const LOGO_WIDTH = 32;
 const LOGO_HEIGHT = 96;
 const COVER_SCALE = 46;
 
-const STEPS = 2; // number of separate scrolls/swipes needed to fully reveal
-const STEP_MS = 420; // each individual step's grow/shrink duration
+const STEPS = 1; // number of separate scrolls/swipes needed to fully reveal
+const STEP_MS = 720; // each individual step's grow/shrink duration
 const OVERLAP_MS = 140; // nav starts settling in slightly before the final
 // step's transform transition technically ends
 const SETTLE_MS = 700; // nav: pure transform+opacity — compositor only
