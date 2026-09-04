@@ -17,9 +17,15 @@ const COVER_SCALE = 46;
 const STEPS = 2; // number of separate scrolls/swipes needed to fully reveal
 const STEP_MS = 420; // each individual step's grow/shrink duration
 const OVERLAP_MS = 140; // nav starts settling in slightly before the final
-// step's transform transition technically ends — same idea as before, just
-// scoped to the last step instead of one long single animation
+// step's transform transition technically ends
 const SETTLE_MS = 700; // nav: pure transform+opacity — compositor only
+
+// If you land mid-way and nothing else happens within this window,
+// the remaining step(s) auto-play in the same direction — this is
+// what stops a single scroll from ever feeling "stuck" waiting for a
+// second one. A genuine second scroll arriving before this fires
+// cancels it and takes over normally.
+const AUTO_CONTINUE_MS = 300;
 
 const scaleForStep = (step) => {
   if (step <= 0) return 1;
@@ -27,19 +33,12 @@ const scaleForStep = (step) => {
   return 1 + (COVER_SCALE - 1) * (step / STEPS);
 };
 
-/**
- * Same box-grows / nav-mounts-after mechanism as before, but the grow
- * (and shrink) now happens across STEPS separate scroll/swipe inputs
- * instead of one continuous animation triggered by a single gesture.
- * Each qualifying wheel/touch input advances (or reverses) exactly
- * one step; further input is ignored until that step's own
- * transition genuinely finishes (`transitionend`), so steps can't
- * stack or skip.
- */
 export default function RevealTransition() {
   const boxRef = useRef(null);
   const stepRef = useRef(0); // 0 (closed) .. STEPS (fully open)
   const animatingRef = useRef(false);
+  const lastDirRef = useRef(1);
+  const autoTimerRef = useRef(null);
   const [contentVisible, setContentVisible] = useState(false);
   const [navSettled, setNavSettled] = useState(false);
 
@@ -49,11 +48,19 @@ export default function RevealTransition() {
 
     box.style.transition = `transform ${STEP_MS}ms cubic-bezier(0.4,0,0.2,1)`;
 
+    const clearAutoContinue = () => {
+      if (autoTimerRef.current != null) {
+        window.clearTimeout(autoTimerRef.current);
+        autoTimerRef.current = null;
+      }
+    };
+
     const advance = (dir) => {
       const current = stepRef.current;
       const next = current + dir;
       if (next < 0 || next > STEPS) return; // already fully closed/open
       animatingRef.current = true;
+      lastDirRef.current = dir;
 
       const targetScale = scaleForStep(next);
 
@@ -62,6 +69,15 @@ export default function RevealTransition() {
         box.removeEventListener("transitionend", onStepEnd);
         stepRef.current = next;
         animatingRef.current = false;
+
+        // Landed mid-way (not fully closed or open) — schedule the
+        // fallback so this never just sits there unfinished.
+        if (next > 0 && next < STEPS) {
+          autoTimerRef.current = window.setTimeout(() => {
+            autoTimerRef.current = null;
+            advance(lastDirRef.current);
+          }, AUTO_CONTINUE_MS);
+        }
       };
       box.addEventListener("transitionend", onStepEnd);
 
@@ -80,8 +96,6 @@ export default function RevealTransition() {
 
       box.style.transform = `translateX(-50%) scale(${targetScale})`;
 
-      // Reaching fully-open on this step — mount the nav slightly
-      // before this step's transition technically ends.
       if (next === STEPS) {
         window.setTimeout(() => {
           setContentVisible(true);
@@ -96,9 +110,11 @@ export default function RevealTransition() {
       }
       if (e.deltaY > 4 && stepRef.current < STEPS) {
         e.preventDefault();
+        clearAutoContinue(); // a real scroll arrived — it drives this step, not the fallback
         advance(1);
       } else if (e.deltaY < -4 && stepRef.current > 0) {
         e.preventDefault();
+        clearAutoContinue();
         advance(-1);
       }
     };
@@ -116,10 +132,12 @@ export default function RevealTransition() {
       const delta = touchStartY - e.touches[0].clientY;
       if (delta > 12 && stepRef.current < STEPS) {
         e.preventDefault();
+        clearAutoContinue();
         advance(1);
-        touchStartY = e.touches[0].clientY; // reset so the next chunk of the same swipe can trigger the next step
+        touchStartY = e.touches[0].clientY;
       } else if (delta < -12 && stepRef.current > 0) {
         e.preventDefault();
+        clearAutoContinue();
         advance(-1);
         touchStartY = e.touches[0].clientY;
       }
@@ -132,12 +150,10 @@ export default function RevealTransition() {
       window.removeEventListener("wheel", onWheel);
       window.removeEventListener("touchstart", onTouchStart);
       window.removeEventListener("touchmove", onTouchMove);
+      clearAutoContinue();
     };
   }, []);
 
-  // Once the nav mounts, let it paint once in its "unsettled" state
-  // before flipping to "settled" — that flip is the scale/fade the
-  // browser actually animates.
   useEffect(() => {
     if (!contentVisible) {
       setNavSettled(false);
@@ -155,7 +171,6 @@ export default function RevealTransition() {
 
   return (
     <>
-      {/* Layer 1 — the growing mark. Pure transform, GPU compositor only. */}
       <div
         ref={boxRef}
         className="fixed left-1/2 top-6 z-30 bg-brand-red will-change-transform sm:top-8"
@@ -168,7 +183,6 @@ export default function RevealTransition() {
         aria-hidden="true"
       />
 
-      {/* Layer 2 — real Page 2 content. */}
       {contentVisible && (
         <div className="fixed inset-0 z-40 flex items-center justify-center overflow-hidden bg-brand-red">
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_20%,rgba(255,255,255,0.14),transparent_55%)]" />
