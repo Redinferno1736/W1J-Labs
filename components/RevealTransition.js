@@ -14,34 +14,31 @@ const LOGO_WIDTH = 32;
 const LOGO_HEIGHT = 96;
 const COVER_SCALE = 46;
 
-const GROW_MS = 800; // box: pure transform scale — GPU compositor only
-const OVERLAP_MS = 190; // how much earlier the nav starts settling in, before
-// the box's grow is technically finished — by this point in the easing
-// curve the box already visually fills the screen, so starting the nav
-// here reads as one continuous handoff instead of a stop-then-go pause
-const SETTLE_MS = 700; // nav: pure transform+opacity — also compositor only
+const STEPS = 2; // number of separate scrolls/swipes needed to fully reveal
+const STEP_MS = 420; // each individual step's grow/shrink duration
+const OVERLAP_MS = 140; // nav starts settling in slightly before the final
+// step's transform transition technically ends — same idea as before, just
+// scoped to the last step instead of one long single animation
+const SETTLE_MS = 700; // nav: pure transform+opacity — compositor only
+
+const scaleForStep = (step) => {
+  if (step <= 0) return 1;
+  if (step >= STEPS) return COVER_SCALE;
+  return 1 + (COVER_SCALE - 1) * (step / STEPS);
+};
 
 /**
- * Sequencing, driven by real events/paints, never guessed timers:
- *
- * FORWARD:
- *   1. box grows via transform: scale (only thing animating)
- *   2. nav mounts a little before the box technically finishes
- *      (OVERLAP_MS early) — the easing curve means the box already
- *      visually fills the screen by then, so this blends the two
- *      motions instead of a stop-then-go handoff
- *   3. nav starts in an "unsettled" state (scale-90, opacity-0)
- *   4. two requestAnimationFrame calls guarantee that unsettled
- *      state is actually painted first
- *   5. only then do we flip to "settled" (scale-100, opacity-100),
- *      which is what the browser actually animates between
- *
- * REVERSE: nav unmounts instantly, two paints confirm it's gone,
- * then the box shrinks back to the logo mark.
+ * Same box-grows / nav-mounts-after mechanism as before, but the grow
+ * (and shrink) now happens across STEPS separate scroll/swipe inputs
+ * instead of one continuous animation triggered by a single gesture.
+ * Each qualifying wheel/touch input advances (or reverses) exactly
+ * one step; further input is ignored until that step's own
+ * transition genuinely finishes (`transitionend`), so steps can't
+ * stack or skip.
  */
 export default function RevealTransition() {
   const boxRef = useRef(null);
-  const stateRef = useRef("closed"); // closed | open
+  const stepRef = useRef(0); // 0 (closed) .. STEPS (fully open)
   const animatingRef = useRef(false);
   const [contentVisible, setContentVisible] = useState(false);
   const [navSettled, setNavSettled] = useState(false);
@@ -50,62 +47,59 @@ export default function RevealTransition() {
     const box = boxRef.current;
     if (!box) return;
 
-    box.style.transition = `transform ${GROW_MS}ms cubic-bezier(0.65,0,0.35,1)`;
+    box.style.transition = `transform ${STEP_MS}ms cubic-bezier(0.4,0,0.2,1)`;
 
-    const open = () => {
+    const advance = (dir) => {
+      const current = stepRef.current;
+      const next = current + dir;
+      if (next < 0 || next > STEPS) return; // already fully closed/open
       animatingRef.current = true;
 
-      const onGrowEnd = (e) => {
+      const targetScale = scaleForStep(next);
+
+      const onStepEnd = (e) => {
         if (e.propertyName !== "transform") return;
-        box.removeEventListener("transitionend", onGrowEnd);
-        stateRef.current = "open";
+        box.removeEventListener("transitionend", onStepEnd);
+        stepRef.current = next;
         animatingRef.current = false;
       };
-      box.addEventListener("transitionend", onGrowEnd);
+      box.addEventListener("transitionend", onStepEnd);
 
-      box.style.transform = `translateX(-50%) scale(${COVER_SCALE})`;
-
-      // Mount the nav a little before the box's grow technically ends —
-      // creates the overlap described above, instead of waiting for the
-      // hard stop of transitionend.
-      window.setTimeout(() => {
-        setContentVisible(true);
-      }, Math.max(GROW_MS - OVERLAP_MS, 0));
-    };
-
-    const close = () => {
-      animatingRef.current = true;
-      setNavSettled(false);
-      setContentVisible(false);
-
-      requestAnimationFrame(() => {
+      // Leaving the fully-open state — unmount the nav first, and wait
+      // two paints so that's actually committed before the box moves.
+      if (current === STEPS && dir === -1) {
+        setNavSettled(false);
+        setContentVisible(false);
         requestAnimationFrame(() => {
-          const onShrinkEnd = (e) => {
-            if (e.propertyName !== "transform") return;
-            box.removeEventListener("transitionend", onShrinkEnd);
-            stateRef.current = "closed";
-            animatingRef.current = false;
-          };
-          box.addEventListener("transitionend", onShrinkEnd);
-
-          box.style.transform = "translateX(-50%) scale(1)";
+          requestAnimationFrame(() => {
+            box.style.transform = `translateX(-50%) scale(${targetScale})`;
+          });
         });
-      });
-    };
+        return;
+      }
 
-    const atTop = () => window.scrollY <= 4;
+      box.style.transform = `translateX(-50%) scale(${targetScale})`;
+
+      // Reaching fully-open on this step — mount the nav slightly
+      // before this step's transition technically ends.
+      if (next === STEPS) {
+        window.setTimeout(() => {
+          setContentVisible(true);
+        }, Math.max(STEP_MS - OVERLAP_MS, 0));
+      }
+    };
 
     const onWheel = (e) => {
       if (animatingRef.current) {
         e.preventDefault();
         return;
       }
-      if (stateRef.current === "closed" && atTop() && e.deltaY > 4) {
+      if (e.deltaY > 4 && stepRef.current < STEPS) {
         e.preventDefault();
-        open();
-      } else if (stateRef.current === "open" && e.deltaY < -4) {
+        advance(1);
+      } else if (e.deltaY < -4 && stepRef.current > 0) {
         e.preventDefault();
-        close();
+        advance(-1);
       }
     };
 
@@ -120,12 +114,14 @@ export default function RevealTransition() {
       }
       if (touchStartY == null) return;
       const delta = touchStartY - e.touches[0].clientY;
-      if (stateRef.current === "closed" && atTop() && delta > 12) {
+      if (delta > 12 && stepRef.current < STEPS) {
         e.preventDefault();
-        open();
-      } else if (stateRef.current === "open" && delta < -12) {
+        advance(1);
+        touchStartY = e.touches[0].clientY; // reset so the next chunk of the same swipe can trigger the next step
+      } else if (delta < -12 && stepRef.current > 0) {
         e.preventDefault();
-        close();
+        advance(-1);
+        touchStartY = e.touches[0].clientY;
       }
     };
 
@@ -182,7 +178,6 @@ export default function RevealTransition() {
             W1J.LABS
           </span>
 
-          {/* The nav settles in — scale-90/opacity-0 -> scale-100/opacity-100. */}
           <nav
             aria-label="Primary"
             className={`liquid-glass relative z-10 flex w-[86%] max-w-md flex-col items-center gap-3 rounded-[2rem] px-10 py-14 transition-[transform,opacity] ease-out sm:w-[24rem] ${
